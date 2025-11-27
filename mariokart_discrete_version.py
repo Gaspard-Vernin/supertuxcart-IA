@@ -305,8 +305,7 @@ if __name__=="__main__":
             if total_reward > best_total_reward:
                 best_total_reward=total_reward
                 print("on a save une reward de ",best_total_reward)
-                PATH = 'dueling_dqn_supertuxkart_v1.pth'
-                torch.save(agent.net.state_dict(), PATH)
+                torch.save(agent.net.state_dict(), "save_reseau_supertuxcart.pth")
             total_reward=0 
             total_distance=0
         compteur_nb_ajout=0

@@ -9,7 +9,7 @@ import time
 import math
 import mariokart_discrete_version as m
 
-chemin_save = 'dueling_dqn_supertuxkart_v1.pth'
+chemin_save = 'save_reseau_supertuxcart.pth'
 if __name__ == "__main__":
     tab_map_action = m.tab_map_action
     taille_input = m.taille_input
