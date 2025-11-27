@@ -8,7 +8,8 @@ import os
 import time
 import math
 import mariokart_discrete_version as m
-
+#git update-index --assume-unchanged save_reseau_supertuxcart.pth
+#git update-index --no-assume-unchanged nom_de_ton_fichier.pth
 chemin_save = 'save_reseau_supertuxcart.pth'
 if __name__ == "__main__":
     tab_map_action = m.tab_map_action
@@ -31,13 +32,18 @@ if __name__ == "__main__":
     compteur_pas_assez_de_vitesse = 0
     seuil_vitesse = 0.5
     compteur_trop_loin = 0
+    temps_derapage=0
     while not done:
-        etat_forw=m.generer_vector_etat(etat)
+        etat_forw=m.generer_vector_etat(etat,temps_derapage)
         forw=net.forward(etat_forw)
         #on renvoie l'action avec la plus grosse Q_value
         action=torch.argmax(forw).item()
         action_tuple = tab_map_action[action]
-        action = m.creer_action(action_tuple[0],action_tuple[1])
+        action = m.creer_action(action_tuple[0],action_tuple[1],action_tuple[2])
+        if(action["drift"]==1):
+                temps_derapage+=1 
+        else : 
+            temps_derapage=0
         etat_suivant,reward,terminated,truncated,_=env.step(action)
         
         largeur_chemin = etat_suivant["paths_width"][0][0]
@@ -58,9 +64,12 @@ if __name__ == "__main__":
             truncated = True 
             reward -= 10
             print("run terminée car trop lent")
+        drift = 0 if etat["skeed_factor"][0] == 1 else 1
         reward = m.def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
                             dist_centre = etat_suivant["center_path_distance"][0] , 
-                            norme_vitesse=m.norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue)
+                            norme_vitesse=m.norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue
+                            ,drift = drift
+                                ,chemin = etat_suivant["paths_start"])
         last_distance_parcourue = etat_suivant["distance_down_track"][0]
         #la partie est finie si on a gagné ou si on est sorti
         done = terminated or truncated
@@ -68,7 +77,7 @@ if __name__ == "__main__":
         total_reward+=reward 
         etat=etat_suivant 
         total_distance+=(etat_suivant["distance_down_track"][0])
-        #time.sleep(0.05)
+        time.sleep(0.05)
         if(done):
             print("distance : ",etat_suivant["distance_down_track"][0],"\n")
     env.close()
