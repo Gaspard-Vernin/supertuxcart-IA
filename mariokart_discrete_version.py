@@ -203,21 +203,23 @@ class Agent:
 
 def map_action(pas_steer,pas_accel):
     """cette fonction prend en entier deux int representant le nombre de segments par lesquels on découpe le steer et l'accel
-        et renvoie une liste (accel,steer) contenant les couples possibles d'accel/virage"""
+        et renvoie une liste (accel,steer,derapage) contenant le produit carthesien des valeur possibles d'accel de steer et de derapage"""
     steer = [round((i+1)/pas_steer,2) for i in range((-pas_steer-1),(pas_steer))]
     accel = [round((i+1)/pas_accel,2) for i in range(pas_accel)]
+    drift = [0,1]
     action_map = []
     for s in steer : 
         for a in accel:
-            action_map.append((a,s))
+            for d in drift:
+                    action_map.append((a,s,d))
     return action_map
-def creer_action(accel,steer):
+def creer_action(accel,steer,drift):
     """renvoie une action formatée sous la forme d'un dictionnaire avec que accel et steer"""
     return {
     'acceleration': np.array([accel],dtype=np.float32),
     'steer': np.array([steer],dtype=np.float32),
     'brake': np.int64(0), 
-    'drift': np.int64(0), 
+    'drift': np.int64(drift), 
     'fire': np.int64(0),  
     'nitro': np.int64(0), 
     'rescue': np.int64(0) 
@@ -226,13 +228,14 @@ def num_action(action):
     """renvoie le numéro associé à l'action donnée"""
     global tab_map_action
     #on commence par convertir l'action en une action valide si elle a été tirée aléatoirement
-    t = (round(action["acceleration"][0],2),round(action["steer"][0],2))
+
+    t = (round(action["acceleration"][0],2),round(action["steer"][0],2),action["drift"])
     t = convert_random_action_to_legal_action(t)
     for i in range(len(tab_map_action)):
         if(tab_map_action[i]==t):
             return i 
     raise Exception("l'action n'est pas dans les actions possibles")
-def generer_vector_etat(etat):
+def generer_vector_etat(etat,temps_derapage):
     """génerer un vecteur avec les infos d'état jugées interessantes pour cette version"""
     center_path = etat["center_path"]
     velocity = etat["velocity"]
@@ -240,6 +243,7 @@ def generer_vector_etat(etat):
     point_proche = chemin_a_suivre[1]
     point_moyen_distance = chemin_a_suivre[2]
     point_loin = chemin_a_suivre[4]
+    derapage = 0 if etat["skeed_factor"][0] == 1 else 1
     #experimentalement, on mesure max_norme_velocity = 23, max_center_path[2]=10
     #les points loin selon z sont à moins de 32 mètres experimentalement,
     #les points loin selon y sont a moins de 4 mètres experimentalement,
@@ -248,7 +252,9 @@ def generer_vector_etat(etat):
                          velocity[0]/23,velocity[1]/23,velocity[2]/23,
                          point_proche[0]/3,point_proche[1]/4,point_proche[2]/32,
                          point_moyen_distance[0]/3,point_moyen_distance[1]/4,point_moyen_distance[2]/32,
-                         point_loin[0]/3,point_loin[1]/4,point_loin[2]/32
+                         point_loin[0]/3,point_loin[1]/4,point_loin[2]/32,
+                         derapage, 
+                         temps_derapage                        
                         ])
 
 def convert_random_action_to_legal_action(random_action):
@@ -257,7 +263,7 @@ def convert_random_action_to_legal_action(random_action):
     #comme tab_map_action est un produit carthésien de l'ensemble des accel par l'ensemble des steer, le point le plus proche
     #de random_action dans tab_map_action est le plus proche coordonnées par coordonnées, donc on calcule juste le min de la
     #somme des distances selon les deux coordonnées
-    return min(tab_map_action, key = lambda couple : abs(couple[0]-random_action[0])+abs(couple[1]-random_action[1]))
+    return min(tab_map_action, key = lambda couple : abs(couple[0]-random_action[0])+abs(couple[1]-random_action[1])+abs(couple[2]-random_action[2]))
 def norme(vecteur):
     return math.sqrt(vecteur[0]**2+vecteur[1]**2+vecteur[2]**2)
 
@@ -271,16 +277,18 @@ def signal_handler(sig, frame):
         except Exception as e:
             print(f"Erreur lors de la fermeture (normale avec Ctrl+C): {e}")
     sys.exit(0)
-def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue):
+def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue,drift,chemin):
     #print("calcul de la reward : \n25*delta distance = :",25*(distance_parcourue-last_distance_parcourue),"\n 2*dist centre = ",2*dist_centre,"\n3*norme_vitesse = ",3*norme_vitesse,"\n reward totale = ",reward)
-    return 25*(distance_parcourue-last_distance_parcourue)-2*abs(dist_centre)+5*norme_vitesse 
+    if abs(chemin[0][0]-chemin[4][0])>1 and drift==1:
+        isdrift = 5 
+    else : 
+        isdrift=0
+    return 25*(distance_parcourue-last_distance_parcourue)-2*abs(dist_centre)+5*norme_vitesse + isdrift
 # Enregistrez le gestionnaire de signal
 signal.signal(signal.SIGINT, signal_handler)
-taille_input=15
+taille_input=17
 tab_map_action = map_action(2,2)
 if __name__=="__main__":
-
-    
     agent = Agent(taille_input,len(tab_map_action),4096,128,0.6,0.4,0.999,0.95,5e-4)
     total_reward=0
     liste_reward=[]
@@ -290,14 +298,17 @@ if __name__=="__main__":
     last_distance_parcourue = 0
     print("len de tabmap = ",len(tab_map_action))
     compteur_nb_ajout = 0
+    
     env=gym.make("supertuxkart/simple-v0",track="zengarden" ,num_kart=2,max_episode_steps=10000)
-    for iter in range(5000):
+    print(env.action_space)
+    for iter in range(2000):
         if(iter==0):
             last_distance_parcourue=0
         print("iter = ",iter,"\n")
         #env=gym.make("supertuxkart/simple-v0",track="zengarden" ,num_kart=2)
         etat,_=env.reset()
         done=False 
+        temps_derapage = 0
         if(iter%50==0):
             print(f"iter : {iter}, reward : {total_reward/50}, epsilon : {agent.eps}")
             liste_reward.append(total_reward/50)
@@ -317,16 +328,20 @@ if __name__=="__main__":
             #on tire une action 
             if np.random.random()>agent.eps : 
                 #on forward l'état
-                etat_forw=generer_vector_etat(etat)
+                etat_forw=generer_vector_etat(etat,temps_derapage)
                 forw=agent.net.forward(etat_forw)
                 #on renvoie l'action avec la plus grosse Q_value
                 action=torch.argmax(forw).item()
                 action_tuple = tab_map_action[action]
-                action = creer_action(action_tuple[0],action_tuple[1])
+                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2])
             else:
                 action=np.random.randint(0,len(tab_map_action))
                 action_tuple = tab_map_action[action]
-                action = creer_action(action_tuple[0],action_tuple[1])
+                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2])
+            if(action["drift"]==1):
+                temps_derapage+=1 
+            else : 
+                temps_derapage=0
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             
             largeur_chemin = etat_suivant["paths_width"][0][0]
@@ -347,11 +362,13 @@ if __name__=="__main__":
                 truncated = True 
                 reward -= 10
                 print("run terminée car trop lent")
-            vector_etat = generer_vector_etat(etat)
-            vector_etat_s = generer_vector_etat(etat_suivant)
+            vector_etat = generer_vector_etat(etat,temps_derapage)
+            vector_etat_s = generer_vector_etat(etat_suivant,temps_derapage)
+            drift = 0 if etat["skeed_factor"][0] == 1 else 1
             reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
                                 dist_centre = etat_suivant["center_path_distance"][0] , 
-                                norme_vitesse=norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue)
+                                norme_vitesse=norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue,drift = drift
+                                ,chemin = etat_suivant["paths_start"])
             last_distance_parcourue = etat_suivant["distance_down_track"][0]
             #la partie est finie si on a gagné ou si on est sorti
             done = terminated or truncated
@@ -375,12 +392,12 @@ if __name__=="__main__":
         total_reward=0
         while not done:
             #on forward l'état
-            etat_forw=generer_vector_etat(etat)
+            etat_forw=generer_vector_etat(etat,temps_derapage)
             forw=agent.net.forward(etat_forw)
             #on renvoie l'action avec la plus grosse Q_value
             action=torch.argmax(forw).item()
             action_tuple = tab_map_action[action]
-            action = creer_action(action_tuple[0],action_tuple[1])
+            action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2])
             #on execute l'action
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             #la partie est finie si on a gagné ou si on est sorti
