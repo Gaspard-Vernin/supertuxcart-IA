@@ -118,19 +118,19 @@ class Buffer:
         compensations/=compensations.max()
         return transitions,indices,compensations
     def update(self,indices,td_errors):
-        td_errors=np.array(td_errors.detach())
+        td_errors=td_errors.detach().cpu().numpy()
         for indice,td_error in zip(indices,td_errors):
             poid=abs(td_error)**self.alpha+1e-5
             self.sumtree.update(self.sumtree.i_data_to_i_arbre(indice),poid)
 class Dueling_network(nn.Module):
     def __init__(self,taille_etat,nb_actions,lr):
         super(Dueling_network,self).__init__()
-        self.fc1=nn.Linear(taille_etat,128)
-        self.fc2=nn.Linear(128,128)
-        self.fc3v=nn.Linear(128,128)
-        self.fcV=nn.Linear(128,1)
-        self.fc3a=nn.Linear(128,128)
-        self.fcA=nn.Linear(128,nb_actions)
+        self.fc1=nn.Linear(taille_etat,512)
+        self.fc2=nn.Linear(512,256)
+        self.fc3v=nn.Linear(256,256)
+        self.fcV=nn.Linear(256,1)
+        self.fc3a=nn.Linear(256,256)
+        self.fcA=nn.Linear(256,nb_actions)
         self.optimizer=torch.optim.Adam(self.parameters(),lr=lr)
     def forward(self,input):
         """effectue le feedforward en utilisant le dueling"""
@@ -149,7 +149,7 @@ class Dueling_network(nn.Module):
         #truc de la taille de v, donc on met keepdim a True
         return v+(a-a.mean(dim=1,keepdim=True))
 class Agent:
-    def __init__(self,state_size,action_size,buffer_capacity,batch_size,alpha,beta,eps,gamma,lr):
+    def __init__(self,state_size,action_size,buffer_capacity,batch_size,alpha,beta,eps,gamma,lr,alphaupdate,tau,temperature):
         self.net = Dueling_network(state_size,action_size,lr)
         self.goal_net = Dueling_network(state_size,action_size,lr)
         #on copie les données de net dans goal_net
@@ -159,6 +159,17 @@ class Agent:
         self.gamma=gamma 
         self.lr=lr 
         self.nb_train=0
+        self.alphaupdate=alphaupdate
+        self.tau=tau
+        self.temperature = temperature
+    def get_action_boltzman(self,etat):
+        etat_forw = generer_vector_etat(etat)
+        with torch.no_grad():
+            q_values = self.net.forward(etat_forw).squeeze()
+        q_values = q_values.cpu().numpy()
+        exp_q_values = np.exp((q_values-q_values.max())/self.temperature)
+        probs = exp_q_values/exp_q_values.sum()
+        return np.random.choice(len(probs),p=probs)
     def train(self):
         """entraine le réseau sur un minibatch extrait du buffer"""
         transitions,indices,compensations=self.buffer.tirage()
@@ -190,15 +201,16 @@ class Agent:
             targets = rewards+self.gamma*(1-dones)*q_values_max_goal
         td_errors = targets-q_values 
         # 3-backprop
-        loss = (compensations * F.smooth_l1_loss(q_values, targets, reduction='none')).mean()
+        loss = (compensations * F.smooth_l1_loss(q_values, self.alphaupdate*targets, reduction='none')).mean()
         self.net.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.net.parameters(),10)
         self.net.optimizer.step()
         # 4-update les values
         self.buffer.update(indices,td_errors)
-        if(self.nb_train%1000==0):
-            self.goal_net.load_state_dict(self.net.state_dict())
+        with torch.no_grad():
+            for target_param, local_param in zip(self.goal_net.parameters(), self.net.parameters()):
+                target_param.data.copy_(self.tau * local_param.data + (1.0 - self.tau) * target_param.data)
         self.nb_train+=1
 
 def map_action(pas_steer,pas_accel):
@@ -237,13 +249,17 @@ def num_action(action):
     raise Exception("l'action n'est pas dans les actions possibles")
 def generer_vector_etat(etat):
     """génerer un vecteur avec les infos d'état jugées interessantes pour cette version"""
+    global obj1x,obj1z,obj1t,obj2x,obj2z,obj2t,obj3x,obj3z,obj3t,bananex,bananez,bananet
     center_path = etat["center_path"]
+    center_path_distance = etat["center_path_distance"]
     velocity = etat["velocity"]
     chemin_a_suivre = etat["paths_start"]
+    point_tres_proche = chemin_a_suivre[0]
     point_proche = chemin_a_suivre[1]
     point_moyen_distance = chemin_a_suivre[2]
-    point_loin = chemin_a_suivre[4]
-    energy = etat["energy"]
+    point_loin = chemin_a_suivre[3]
+    point_tres_loin = chemin_a_suivre[4]
+    energy = etat["energy"][0]
     #on stocke la position de la banane/chewingum la plus proche et des trois items les plus proches
     #si pas assez d'items proche ou bien items a plus de 40m selon z, on met le type a 0, et x = z = 1
     #autrement, on normalise par 80 selon z et par 30 selon x comme ca on est loin de 1 et l'IA peut bien
@@ -251,9 +267,9 @@ def generer_vector_etat(etat):
     indices_items=[]
     indice_banane=-1
     for i in range(len(etat["items_type"])):
-        if etat['items_type'][i] in (2,3) and len(indices_items)<3 and 0<etat['items_position'][i][2]<40:
+        if etat['items_type'][i] in (2,3) and len(indices_items)<3 and 0<etat['items_position'][i][2]<80:
             indices_items.append(i)
-        elif etat['items_type'][i]==0 and indice_banane==-1 and etat['items_position'][i][2]<40:
+        elif etat['items_type'][i] in (1,4) and indice_banane==-1 and etat['items_position'][i][2]<80:
             indice_banane=i
     #si on a pas 3 nitros a assez proches : 
     match len(indices_items):
@@ -261,70 +277,72 @@ def generer_vector_etat(etat):
         case 0 : 
             obj1x=0
             obj1z=1
-            obj1t=0
+            is_obj1_boost=0
             obj2x=0
             obj2z=1
-            obj2t=0
+            is_obj2_boost=0
             obj3x=0
             obj3z=1
-            obj3t=0
+            is_obj3_boost=0
         case 1 :
             obj1x=etat['items_position'][indices_items[0]][0]/3
             obj1z=etat['items_position'][indices_items[0]][2]/40
-            obj1t=(etat['items_type'][indices_items[0]]+1)/5
+            is_obj1_boost=1
             obj2x=0
             obj2z=1
-            obj2t=0
+            is_obj2_boost=0
             obj3x=0
             obj3z=1
-            obj3t=0
+            is_obj3_boost=0
         case 2 :
             obj1x=etat['items_position'][indices_items[0]][0]/3
             obj1z=etat['items_position'][indices_items[0]][2]/40
-            obj1t=(etat['items_type'][indices_items[0]]+1)/5
+            is_obj1_boost=1
             obj2x=etat['items_position'][indices_items[1]][0]/3
             obj2z=etat['items_position'][indices_items[1]][2]/40
-            obj2t=(etat['items_type'][indices_items[1]]+1)/5
+            is_obj2_boost=1
             obj3x=0
             obj3z=1
-            obj3t=0
+            is_obj3_boost=0
         case 3 :
             obj1x=etat['items_position'][indices_items[0]][0]/3
             obj1z=etat['items_position'][indices_items[0]][2]/40
-            obj1t=(etat['items_type'][indices_items[0]]+1)/5
+            is_obj1_boost=1
             obj2x=etat['items_position'][indices_items[1]][0]/3
             obj2z=etat['items_position'][indices_items[1]][2]/40
-            obj2t=(etat['items_type'][indices_items[1]]+1)/5
+            is_obj2_boost=1
             obj3x=etat['items_position'][indices_items[2]][0]/3
             obj3z=etat['items_position'][indices_items[2]][2]/40
-            obj3t=(etat['items_type'][indices_items[2]]+1)/5
+            is_obj3_boost=1
         case _ :
             raise Exception("la taille de indice_items a dépassée 3")
     if indice_banane == -1 :
         bananex=0
         bananez=1
-        bananet=0
+        is_banane_a_banane=0
     else : 
         bananex=etat['items_position'][indice_banane][0]/3
         bananez=etat['items_position'][indice_banane][2]/40
-        bananet=(etat['items_type'][indice_banane]+1)/5
+        is_banane_a_banane=1
     #experimentalement, on mesure max_norme_velocity = 23, max_center_path[2]=10
-    #les points loin selon z sont à moins de 32 mètres experimentalement,
+    #les points loin selon z sont à moins de 40 mètres experimentalement,
     #les points loin selon y sont a moins de 4 mètres experimentalement,
     #les points loin selon x sont a moins de 3 mètres experimentalement
-    if(obj1z>obj2z or obj2z>obj3z):
-        print("obj1z = ",obj1z,"obj2z=",obj2z,"obj3z",obj3z)
-    return torch.tensor([center_path[0]/3,center_path[2]/40,
+    #print("on voit ",etat['items_type'])
+    return torch.from_numpy(np.array([center_path[0].item()/3,center_path[2].item()/40,
+                         center_path_distance[0]/3,center_path_distance[0]/40,
                          velocity[0]/23,velocity[2]/23,
+                         point_tres_proche[0]/3,point_tres_proche[2]/40,
                          point_proche[0]/3,point_proche[2]/40,
                          point_moyen_distance[0]/3,point_moyen_distance[2]/40,
                          point_loin[0]/3,point_loin[2]/40,
+                         point_tres_loin[0]/3,point_tres_loin[2]/40,
                          energy,
-                         obj1x,obj1z,obj1t,
-                         obj2x,obj2z,obj2t,
-                         obj3x,obj3z,obj3t,
-                         bananex,bananez,bananet
-                        ],dtype=torch.float32)
+                         obj1x,obj1z,is_obj1_boost,
+                         obj2x,obj2z,is_obj2_boost,
+                         obj3x,obj3z,is_obj3_boost,
+                         bananex,bananez,is_banane_a_banane
+                        ],dtype = np.float32))
 
 def convert_random_action_to_legal_action(random_action):
     """renvoie un tuple (accel,steer) correspondant au tuple le plus proche de random_action dans tab_map_action"""
@@ -345,53 +363,93 @@ def signal_handler(sig, frame):
             print(f"Erreur lors de la fermeture (normale avec Ctrl+C): {e}")
     sys.exit(0)
 
-def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue,last_energie,energie):
-    if(energie-last_energie!=0):print("delta energie = ",energie-last_energie)
-    return 35*(distance_parcourue-last_distance_parcourue)+norme_vitesse + 1000*max(0,(energie-last_energie)-0.01)
+def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue,last_energie,energie,distance):
+    global last_distance,obj1x,obj1z,is_obj1_boost,obj2x,obj2z,obj2t,obj3x,obj3z,obj3t,bananex,bananez,is_banane_a_banane
+    #if(energie-last_energie!=0):print("delta energie = ",energie-last_energie)
+    #si on vient de ramasser un boost
+    """if(energie-last_energie>0):
+        recompense_boost = 20*(energie-last_energie)
+    else : 
+        recompense_boost = 0"""
+    reward_banane=False
+    recompense_boost=False
+    if(math.sqrt(obj1x**2+obj1z**2)<0.13 and (obj1x!=0)):
+        #print("proche,obj1x",obj1x,"obj1x,",obj1z)
+        #print("distance a l'objet = ",math.sqrt(obj1x**2+obj1z**2))
+        #si c un petit boost
+        if is_obj1_boost == 0.8:
+            print("boost")
+            #time.sleep(2)
+            recompense_boost = True
+    if(math.sqrt(bananex**2+bananez**2)<0.13 and (bananex!=0)):
+        #print("distance a la banane = ",math.sqrt(bananex**2+bananez**2))
+        #si c une banane
+        print("banane")
+        #time.sleep(2)
+        reward_banane = True
+
+    #reward = 35*(distance_parcourue-last_distance_parcourue)+norme_vitesse + recompense_boost+reward_banane
+    #if recompense_boost!=0 : 
+        #print("proportion de distance dans reward : ",(35*(distance_parcourue-last_distance_parcourue)/reward)*100,"%\nproportion de vitesse dans reward : ",100*norme_vitesse/reward , "%\n proportion de boost dans reward : ",100*recompense_boost/reward,"%")
+    if not reward_banane and not recompense_boost : 
+        #print("ok")
+        reward = (distance_parcourue-last_distance_parcourue)*(20+norme_vitesse-dist_centre/3)
+        #print("PCD:",(35*(distance_parcourue-last_distance_parcourue)/(reward)),"PCDV:",norme_vitesse/(reward),"reward = ",reward)
+        return reward
+    elif recompense_boost:
+        #print("a")
+        return (distance_parcourue-last_distance_parcourue)*(800+norme_vitesse-dist_centre/3)
+    else : 
+        #print("b")
+        return - (distance_parcourue-last_distance_parcourue)*(800+norme_vitesse-dist_centre/3)
 # Enregistrez le gestionnaire de signal
 signal.signal(signal.SIGINT, signal_handler)
 taille_input=0
-tab_map_action = map_action(2,2)
+tab_map_action = map_action(3,3)
 temps_derapage = 0
 mode_vision = False
 drift_fini = False
+last_distance = 0
 last_energie=0
 energie=0
+is_visualisation = False
+last_distance,obj1x,obj1z,is_obj1_boost,obj2x,obj2z,obj3x,obj3z,obj3t,bananex,bananez,is_banane_a_banane=0,0,0,0,0,0,0,0,0,0,0,0
 if __name__=="__main__":
-    env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000)
     #on récupère la taille de l'input en testant la sortie de la fonction generer vector etat
+    env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000,track='cornfield_crossing')
     etat_test = env.observation_space.sample()
     taille_input = len(generer_vector_etat(etat_test))
-    agent = Agent(taille_input,len(tab_map_action),4096,128,0.6,0.4,0.999,0.995,5e-4)
+    agent = Agent(taille_input,len(tab_map_action),16384,128,0.5,0.4,0.99,0.995,1e-4,0.5,0.005,2.5)
     total_reward=0
     liste_reward=[]
     liste_distances=[]
     total_distance=0
-    best_total_reward = -10e10
+    best_total_reward = -100
     last_distance_parcourue = 0
     print("len de tabmap = ",len(tab_map_action))
     compteur_nb_ajout = 0
-    print(env.action_space)
-    for iter in range(2000):
-        if(iter==0):
-            last_distance_parcourue=0
+    for iter in range(0,5000):
+        agent.buffer.beta=min(1,1.001*agent.buffer.beta)
+        last_distance_parcourue=0
         print("iter = ",iter,"\n")
         if mode_vision:
-            if(iter%20 == 0):
-                env=gym.make("supertuxkart/simple-v0" ,num_kart=2,render_mode="human")
-            if((iter-1)%20==0):
-                env=gym.make("supertuxkart/simple-v0",num_kart=2)
+            if(iter%50 == 0):
+                env.close()
+                env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000,render_mode="human",track='cornfield_crossing')
+                is_visualisation = True
+            if((iter-1)%50==0):
+                env.close()
+                env=gym.make("supertuxkart/simple-v0",num_kart=2,track='cornfield_crossing')
+                is_visualisation = False
         etat,_=env.reset()
         done=False 
         temps_derapage = 0
-        if(iter%50==0):
-            print(f"iter : {iter}, reward : {total_reward/50}, epsilon : {agent.eps}")
-            liste_reward.append(total_reward/50)
-            liste_distances.append(total_distance/50)
-            if total_reward > best_total_reward:
-                best_total_reward=total_reward
-                print("on a save une reward de ",best_total_reward)
-                torch.save(agent.net.state_dict(), "save_reseau_supertuxcart.pth")
+        if(iter%100==0):
+            print(f"iter : {iter}, reward : {total_reward/100}, epsilon : {agent.eps}")
+            liste_reward.append(total_reward/100)
+            liste_distances.append(total_distance/100)
+            nom_fichier = f"save_iter_{iter}.pth"
+            torch.save(agent.goal_net.state_dict(), nom_fichier)
             total_reward=0 
             total_distance=0
         compteur_nb_ajout=0
@@ -399,10 +457,12 @@ if __name__=="__main__":
         seuil_vitesse = 0.5
         compteur_trop_loin = 0
         # Avant la boucle while not done:
+        nbframe=0
         while not done:
+            nbframe+=1
             compteur_nb_ajout+=1
             #on tire une action 
-            if np.random.random()>agent.eps : 
+            if is_visualisation: 
                 #on forward l'état
                 etat_forw=generer_vector_etat(etat)
                 forw=agent.net.forward(etat_forw)
@@ -411,7 +471,7 @@ if __name__=="__main__":
                 action_tuple = tab_map_action[action]
                 action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2])
             else:
-                action=np.random.randint(0,len(tab_map_action))
+                action=agent.get_action_boltzman(etat)
                 action_tuple = tab_map_action[action]
                 action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2])
             if(action["drift"]==1 and abs(etat["skeed_factor"])>1.2):
@@ -421,13 +481,13 @@ if __name__=="__main__":
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             
             largeur_chemin = etat_suivant["paths_width"][0][0]
-            if(abs(etat_suivant["center_path_distance"][0])>largeur_chemin/1.5):
+            if(abs(etat_suivant["center_path_distance"][0])>largeur_chemin):
                 compteur_trop_loin+=1
             else : 
                 compteur_trop_loin = max(0,compteur_trop_loin-1)
-            if(compteur_trop_loin>=5):
+            if(compteur_trop_loin>=10):
                 truncated=True 
-                reward-=1000
+                reward-=500
                 print("run terminée car trop loin")
             if(norme(etat_suivant["velocity"])<seuil_vitesse):
                 compteur_pas_assez_de_vitesse+=1
@@ -436,7 +496,7 @@ if __name__=="__main__":
                 compteur_pas_assez_de_vitesse = max(0,compteur_pas_assez_de_vitesse-1)
             if(compteur_pas_assez_de_vitesse>=60):
                 truncated = True 
-                reward -= 10
+                reward -= 200
                 print("run terminée car trop lent")
             vector_etat = generer_vector_etat(etat)
             vector_etat_s = generer_vector_etat(etat_suivant)
@@ -445,7 +505,8 @@ if __name__=="__main__":
             reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
                                 dist_centre = etat_suivant["center_path_distance"][0] , 
                                 norme_vitesse=norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue,
-                                last_energie=last_energie,energie=energie)
+                                last_energie=last_energie,energie=energie,
+                                distance= norme(etat['items_position'][0]))
             last_energie=energie
             last_distance_parcourue = etat_suivant["distance_down_track"][0]
             #la partie est finie si on a gagné ou si on est sorti
@@ -459,8 +520,9 @@ if __name__=="__main__":
             total_distance+=(etat_suivant["distance_down_track"][0])
             if(done):
                 print("distance : ",etat_suivant["distance_down_track"][0],"\n")
-        agent.eps=max(0.1,agent.eps*0.99)
-    
+        agent.eps=max(0.15,agent.eps*0.9985)
+        agent.temperature = max(0.3, agent.temperature*0.995)
+        print("nb frame :",nbframe)
     plt.plot(liste_reward)
     plt.show()
     env=gym.make("supertuxkart/simple-v0",track="zengarden",render_mode="human",num_kart=2,max_episode_steps=10000)
