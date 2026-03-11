@@ -272,8 +272,8 @@ def map_action(pas_steer,pas_accel):
 def creer_action(accel,steer,nitro,fire,drift):
     """renvoie une action formatée sous la forme d'un dictionnaire avec que accel et steer"""
     return {
-    'acceleration': np.array([accel],dtype=np.float32),
-    'steer': np.array([steer],dtype=np.float32),
+    'acceleration': np.float32(accel),
+    'steer': np.float32(steer),
     'brake': np.int64(0), 
     'drift': np.int64(drift), 
     'fire': np.int64(fire),  
@@ -285,7 +285,7 @@ def num_action(action):
     global tab_map_action
     #on commence par convertir l'action en une action valide si elle a été tirée aléatoirement
 
-    t = (round(action["acceleration"][0],2),round(action["steer"][0],2),action["nitro"],action["fire"],action["drift"])
+    t = (round(action["acceleration"],2),round(action["steer"],2),action["nitro"],action["fire"],action["drift"])
     t = convert_random_action_to_legal_action(t)
     for i in range(len(tab_map_action)):
         if(tab_map_action[i]==t):
