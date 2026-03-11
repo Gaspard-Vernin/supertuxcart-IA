@@ -27,9 +27,9 @@ class Noisy_linear_layer(nn.Module):
         self.variance_poids= nn.Parameter(nn.init.constant_(torch.empty(taille_sortie,taille_entree),0.5/math.sqrt(taille_entree)))
         self.variance_biais=nn.Parameter(nn.init.constant_(torch.empty(taille_sortie),0.5/math.sqrt(taille_sortie)))
     
-        self.noise_in=self.init_noise_in()
-        self.noise_out=self.init_noise_out()
-        self.matrice_bruit_poids = torch.outer(self.noise_out,self.noise_in)
+        self.noise_in=None
+        self.noise_out=None
+        self.matrice_bruit_poids = None
 
     def init_noise_in(self):
         bruit= torch.randn(self.taille_entree)
@@ -210,9 +210,11 @@ class Agent:
         self.alphaupdate=alphaupdate
         self.tau=tau
     def train(self):
+        if self.buffer.sumtree.taille_actuele<self.buffer.batch_size : 
+            return
+        """entraine le réseau sur un minibatch extrait du buffer"""
         self.net.reset_bruit()
         self.goal_net.reset_bruit()
-        """entraine le réseau sur un minibatch extrait du buffer"""
         transitions,indices,compensations=self.buffer.tirage()
         """Plan : 
             1-forward les actions sur etats
@@ -229,20 +231,20 @@ class Agent:
         #pour calculer les targets, on ne veut pas que les gradients soient modifiés
         with torch.no_grad():
             #on calcule les actions suivantes selon le net actuel mais on calcule leur q_values avec le goalnet pour plus de stabilité
-            etats_suivant= torch.tensor(np.array([transitions[i].prochain_etat for i in range(self.buffer.batch_size)]))
-            forws_suivant = self.net.forward(etats_suivant)
+            etats_n_step_suivant= torch.tensor(np.array([transitions[i].etat_plus_n for i in range(self.buffer.batch_size)]))
+            forws_suivant = self.net.forward(etats_n_step_suivant)
             #forws_suivant de dim batch_sizexactions donc on veut argmax selon les actions
             next_actions = forws_suivant.argmax(dim=1)
             #on calcule les q values sur le goal net selon les actions choisies par le net normal
-            forws_suivant_goal = self.goal_net.forward(etats_suivant)
+            forws_suivant_goal = self.goal_net.forward(etats_n_step_suivant)
             q_values_max_goal = forws_suivant_goal[torch.arange(self.buffer.batch_size),next_actions]
             #on vectorise tout pour calculer les target plus vite
             rewards=torch.tensor(np.array([transitions[i].reward for i in range(self.buffer.batch_size)]))
-            dones=torch.tensor(np.array([transitions[i].done for i in range(self.buffer.batch_size)]),dtype=torch.float32)
-            targets = rewards+self.gamma*(1-dones)*q_values_max_goal
+            dones=torch.tensor(np.array([transitions[i].done_plus_n for i in range(self.buffer.batch_size)]),dtype=torch.float32)
+            targets = rewards+(self.gamma**n_val)*(1-dones)*q_values_max_goal
         td_errors = targets-q_values 
         # 3-backprop
-        loss = (compensations * F.smooth_l1_loss(q_values, self.alphaupdate*targets, reduction='none')).mean()
+        loss = (compensations * torch.nn.functional.smooth_l1_loss(q_values, self.alphaupdate*targets, reduction='none')).mean()
         self.net.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.net.parameters(),10)
@@ -463,7 +465,7 @@ if __name__=="__main__":
     for iter in range(0,5000):
         agent.buffer.beta=min(1,1.001*agent.buffer.beta)
         last_distance_parcourue=0
-        print("iter = ",iter,"\n")
+        print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \niter = ",iter,"\n")
         if mode_vision:
             if(iter%50 == 0 and iter!=0):
                 env.close()
@@ -565,8 +567,6 @@ if __name__=="__main__":
                 sauvegarde_transi[i].reward+=(agent.gamma**j)*sauvegarde_etats_reward[i+j][1]
             agent.buffer.add(sauvegarde_transi[i])
         agent.eps=max(0.15,agent.eps*0.9985)
-        agent.temperature = max(0.3, agent.temperature*0.995)
-        print("nb frame :",nbframe)
     plt.plot(liste_reward)
     plt.show()
     env=gym.make("supertuxkart/simple-v0",track="zengarden",render_mode="human",num_kart=2,max_episode_steps=10000)
