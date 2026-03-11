@@ -444,7 +444,7 @@ if __name__=="__main__":
     env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000)
     etat_test = env.observation_space.sample()
     taille_input = len(generer_vector_etat(etat_test))
-    agent = Agent(taille_input,len(tab_map_action),16384,128,0.6,0.4,0.99,0.999,1e-4,0.5,0.01,2.5)
+    agent = Agent(taille_input,len(tab_map_action),16384,128,0.6,0.4,0.99,0.999,1e-4,0.5,0.01)
     total_reward=0
     liste_reward=[]
     liste_distances=[]
@@ -453,7 +453,6 @@ if __name__=="__main__":
     last_distance_parcourue = 0
     print("len de tabmap = ",len(tab_map_action))
     compteur_nb_ajout = 0
-    sauvegarde_transi
     for iter in range(0,5000):
         agent.buffer.beta=min(1,1.001*agent.buffer.beta)
         last_distance_parcourue=0
@@ -490,19 +489,14 @@ if __name__=="__main__":
         while not done:
             nbframe+=1
             compteur_nb_ajout+=1
-            #on tire une action 
-            if is_visualisation: 
-                #on forward l'état
-                etat_forw=generer_vector_etat(etat)
+            #on forward l'état
+            etat_forw=generer_vector_etat(etat)
+            with torch.no_grad():
                 forw=agent.net.forward(etat_forw)
-                #on renvoie l'action avec la plus grosse Q_value
-                action=torch.argmax(forw).item()
-                action_tuple = tab_map_action[action]
-                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
-            else:
-                action=agent.get_action_boltzman(etat)
-                action_tuple = tab_map_action[action]
-                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
+            #on renvoie l'action avec la plus grosse Q_value
+            action=torch.argmax(forw).item()
+            action_tuple = tab_map_action[action]
+            action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             
            
