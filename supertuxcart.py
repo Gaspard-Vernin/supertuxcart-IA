@@ -22,9 +22,9 @@ class Noisy_linear_layer(nn.Module):
         super().__init__()
         self.taille_entree=taille_entree 
         self.taille_sortie=taille_sortie 
-        self.esperance_poids = nn.Parameter(nn.init.uniform_(torch.empty(taille_entree,taille_sortie),-1/math.sqrt(taille_entree),1/math.sqrt(taille_entree)))
+        self.esperance_poids = nn.Parameter(nn.init.uniform_(torch.empty(taille_sortie,taille_entree),-1/math.sqrt(taille_entree),1/math.sqrt(taille_entree)))
         self.esperance_biais = nn.Parameter(nn.init.uniform_(torch.empty(taille_sortie),-1/math.sqrt(taille_entree),1/math.sqrt(taille_entree)))
-        self.variance_poids= nn.Parameter(nn.init.constant_(torch.empty(taille_entree,taille_sortie),0.5/math.sqrt(taille_entree)))
+        self.variance_poids= nn.Parameter(nn.init.constant_(torch.empty(taille_sortie,taille_entree),0.5/math.sqrt(taille_entree)))
         self.variance_biais=nn.Parameter(nn.init.constant_(torch.empty(taille_sortie),0.5/math.sqrt(taille_sortie)))
     
         self.noise_in=self.init_noise_in()
@@ -165,6 +165,7 @@ class Buffer:
 class Dueling_network(nn.Module):
     def __init__(self,taille_etat,nb_actions,lr):
         super().__init__()
+        #!!! si on ajoute des couches ne pas oublier de changer reset_bruit !!!
         self.fc1=Noisy_linear_layer(taille_etat,512)
         self.fc2=Noisy_linear_layer(512,256)
         self.fc3v=Noisy_linear_layer(256,256)
@@ -188,6 +189,13 @@ class Dueling_network(nn.Module):
         #veut le moyenne sur les actions. Ceci nous renvoie un vecteur de taille (64,0) or on veut un 
         #truc de la taille de v, donc on met keepdim a True
         return v+(a-a.mean(dim=1,keepdim=True))
+    def reset_bruit(self):
+        self.fc1.reset_bruit()
+        self.fc2.reset_bruit()
+        self.fc3v.reset_bruit()
+        self.fcV.reset_bruit()
+        self.fc3a.reset_bruit()
+        self.fcA.reset_bruit()
 class Agent:
     def __init__(self,state_size,action_size,buffer_capacity,batch_size,alpha,beta,eps,gamma,lr,alphaupdate,tau):
         self.net = Dueling_network(state_size,action_size,lr)
@@ -544,6 +552,8 @@ if __name__=="__main__":
             total_distance+=(etat_suivant["distance_down_track"][0])
             if(done):
                 print("distance : ",etat_suivant["distance_down_track"][0],"\n")
+        vector_etat_final = generer_vector_etat(etat_suivant)
+        sauvegarde_etats_reward.append((vector_etat_final, 0))
         nb_step_game=len(sauvegarde_transi)
         for i in range(nb_step_game):
             if i >= nb_step_game-n_val : 
