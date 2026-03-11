@@ -17,6 +17,40 @@ import os
 n_val=3
 os.environ["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
 os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+class Noisy_linear_layer(nn.Module):
+    def __init__(self,taille_entree,taille_sortie):
+        super().__init__()
+        self.taille_entree=taille_entree 
+        self.taille_sortie=taille_sortie 
+        self.esperance_poids = nn.Parameter(nn.init.uniform_(torch.empty(taille_entree,taille_sortie),-1/math.sqrt(taille_entree),1/math.sqrt(taille_entree)))
+        self.esperance_biais = nn.Parameter(nn.init.uniform_(torch.empty(taille_sortie),-1/math.sqrt(taille_entree),1/math.sqrt(taille_entree)))
+        self.variance_poids= nn.Parameter(nn.init.constant_(torch.empty(taille_entree,taille_sortie),0.5/math.sqrt(taille_entree)))
+        self.variance_biais=nn.Parameter(nn.init.constant_(torch.empty(taille_sortie),0.5/math.sqrt(taille_sortie)))
+    
+        self.noise_in=self.init_noise_in()
+        self.noise_out=self.init_noise_out()
+        self.matrice_bruit_poids = torch.outer(self.noise_out,self.noise_in)
+
+    def init_noise_in(self):
+        bruit= torch.randn(self.taille_entree)
+        return torch.sign(bruit)*torch.sqrt(torch.abs(bruit))
+    def init_noise_out(self):
+        bruit= torch.randn(self.taille_sortie)
+        return torch.sign(bruit)*torch.sqrt(torch.abs(bruit))
+    def f(self,x):
+        if x<0:
+            return -math.sqrt(abs(x))
+        return math.sqrt(abs(x))
+    def forward(self,input):    
+        poids = self.esperance_poids+self.variance_poids*self.matrice_bruit_poids
+        biais = self.esperance_biais+self.variance_biais*self.noise_out
+        output = torch.nn.functional.linear(input,poids,biais)
+        return output
+    def reset_bruit(self):
+        self.noise_in=self.init_noise_in()
+        self.noise_out=self.init_noise_out()
+        self.matrice_bruit_poids = torch.outer(self.noise_out,self.noise_in)
+        return
 class Transi:
     def __init__(self,etat,action,reward,done,etat_plus_n):
         self.etat=etat 
@@ -26,7 +60,7 @@ class Transi:
         self.etat_plus_n = etat_plus_n
     def __eq__(self, t1):
         assert(isinstance(t1,Transi))
-        return (self.etat==t1.etat) and (self.action==t1.action) and (self.reward==t1.reward) and (self.done==t1.done) and (self.etat_plus_n==t1.etat_plus_n)
+        return (self.etat==t1.etat) and (self.action==t1.action) and (self.reward==t1.reward)  and (self.done==t1.done) and (self.etat_plus_n==t1.etat_plus_n)
 class Sumtree:
     def __init__(self,taille):
         self.taille=taille 
@@ -130,24 +164,24 @@ class Buffer:
             self.sumtree.update(self.sumtree.i_data_to_i_arbre(indice),poid)
 class Dueling_network(nn.Module):
     def __init__(self,taille_etat,nb_actions,lr):
-        super(Dueling_network,self).__init__()
-        self.fc1=nn.Linear(taille_etat,512)
-        self.fc2=nn.Linear(512,256)
-        self.fc3v=nn.Linear(256,256)
-        self.fcV=nn.Linear(256,1)
-        self.fc3a=nn.Linear(256,256)
-        self.fcA=nn.Linear(256,nb_actions)
+        super().__init__()
+        self.fc1=Noisy_linear_layer(taille_etat,512)
+        self.fc2=Noisy_linear_layer(512,256)
+        self.fc3v=Noisy_linear_layer(256,256)
+        self.fcV=Noisy_linear_layer(256,1)
+        self.fc3a=Noisy_linear_layer(256,256)
+        self.fcA=Noisy_linear_layer(256,nb_actions)
         self.optimizer=torch.optim.Adam(self.parameters(),lr=lr)
     def forward(self,input):
         """effectue le feedforward en utilisant le dueling"""
         # Si l'input n'a qu'une dimension on ajoute la dimension 
         if input.dim() == 1:
             input = input.unsqueeze(0) # Transforme (8) en (1, 8)
-        x=torch.relu(self.fc1(input))
-        x=torch.relu(self.fc2(x))
-        v=torch.relu(self.fc3v(x))
+        x=torch.relu(self.fc1.forward(input))
+        x=torch.relu(self.fc2.forward(x))
+        v=torch.relu(self.fc3v.forward(x))
         v=self.fcV(v)
-        x=torch.relu(self.fc3a(x))
+        x=torch.relu(self.fc3a.forward(x))
         a=self.fcA(x)
         #a représente a quel point l'état est intéressant et v donne a quel point une action est bonne
         #on lui soustrait sa moyenne (dim=1 car il est de taille batchs_sizexnb_actions et qu'on
@@ -155,7 +189,7 @@ class Dueling_network(nn.Module):
         #truc de la taille de v, donc on met keepdim a True
         return v+(a-a.mean(dim=1,keepdim=True))
 class Agent:
-    def __init__(self,state_size,action_size,buffer_capacity,batch_size,alpha,beta,eps,gamma,lr,alphaupdate,tau,temperature):
+    def __init__(self,state_size,action_size,buffer_capacity,batch_size,alpha,beta,eps,gamma,lr,alphaupdate,tau):
         self.net = Dueling_network(state_size,action_size,lr)
         self.goal_net = Dueling_network(state_size,action_size,lr)
         #on copie les données de net dans goal_net
@@ -167,18 +201,9 @@ class Agent:
         self.nb_train=0
         self.alphaupdate=alphaupdate
         self.tau=tau
-        self.temperature = temperature
-    def get_action_boltzman(self,etat):
-        etat_forw = generer_vector_etat(etat)
-        with torch.no_grad():
-            q_values = self.net.forward(etat_forw).squeeze()
-        q_values = q_values.cpu().numpy()
-        exp_q_values = np.exp((q_values-q_values.max())/self.temperature)
-        probs = exp_q_values/exp_q_values.sum()
-        return np.random.choice(len(probs),p=probs)
     def train(self):
-        if self.buffer.sumtree.taille_actuele<self.buffer.batch_size : 
-            return
+        self.net.reset_bruit()
+        self.goal_net.reset_bruit()
         """entraine le réseau sur un minibatch extrait du buffer"""
         transitions,indices,compensations=self.buffer.tirage()
         """Plan : 
@@ -196,17 +221,17 @@ class Agent:
         #pour calculer les targets, on ne veut pas que les gradients soient modifiés
         with torch.no_grad():
             #on calcule les actions suivantes selon le net actuel mais on calcule leur q_values avec le goalnet pour plus de stabilité
-            etats_n_step_suivant= torch.tensor(np.array([transitions[i].etat_plus_n for i in range(self.buffer.batch_size)]))
-            forws_suivant = self.net.forward(etats_n_step_suivant)
+            etats_suivant= torch.tensor(np.array([transitions[i].prochain_etat for i in range(self.buffer.batch_size)]))
+            forws_suivant = self.net.forward(etats_suivant)
             #forws_suivant de dim batch_sizexactions donc on veut argmax selon les actions
             next_actions = forws_suivant.argmax(dim=1)
             #on calcule les q values sur le goal net selon les actions choisies par le net normal
-            forws_suivant_goal = self.goal_net.forward(etats_n_step_suivant)
+            forws_suivant_goal = self.goal_net.forward(etats_suivant)
             q_values_max_goal = forws_suivant_goal[torch.arange(self.buffer.batch_size),next_actions]
             #on vectorise tout pour calculer les target plus vite
             rewards=torch.tensor(np.array([transitions[i].reward for i in range(self.buffer.batch_size)]))
-            dones=torch.tensor(np.array([transitions[i].done_plus_n for i in range(self.buffer.batch_size)]),dtype=torch.float32)
-            targets = rewards+(self.gamma**n_val)*(1-dones)*q_values_max_goal
+            dones=torch.tensor(np.array([transitions[i].done for i in range(self.buffer.batch_size)]),dtype=torch.float32)
+            targets = rewards+self.gamma*(1-dones)*q_values_max_goal
         td_errors = targets-q_values 
         # 3-backprop
         loss = (compensations * F.smooth_l1_loss(q_values, self.alphaupdate*targets, reduction='none')).mean()
@@ -220,7 +245,6 @@ class Agent:
             for target_param, local_param in zip(self.goal_net.parameters(), self.net.parameters()):
                 target_param.data.copy_(self.tau * local_param.data + (1.0 - self.tau) * target_param.data)
         self.nb_train+=1
-
 def map_action(pas_steer,pas_accel):
     """cette fonction prend en entier deux int representant le nombre de segments par lesquels on découpe le steer et l'accel
         et renvoie une liste (accel,steer,derapage) contenant le produit carthesien des valeur possibles d'accel de steer et de derapage"""
@@ -365,7 +389,6 @@ def convert_random_action_to_legal_action(random_action):
     return min(tab_map_action, key = lambda couple : abs(couple[0]-random_action[0])+abs(couple[1]-random_action[1])+abs(couple[2]-random_action[2])+abs(couple[3]-random_action[3])+abs(couple[4]-random_action[4]))
 def norme(vecteur):
     return math.sqrt(vecteur[0]**2+vecteur[1]**2+vecteur[2]**2)
-
 def signal_handler(sig, frame):
     global env
     if env is not None:
@@ -374,7 +397,6 @@ def signal_handler(sig, frame):
         except Exception as e:
             print(f"Erreur lors de la fermeture (normale avec Ctrl+C): {e}")
     sys.exit(0)
-
 def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue,last_energie,energie,drift,skeed,x,z):
     global last_distance,obj1x,obj1z,is_obj1_boost,obj2x,obj2z,is_obj2_boost,obj3x,obj3z,obj3t,bananex,bananez,is_banane_a_banane
     
@@ -422,7 +444,7 @@ if __name__=="__main__":
     env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000)
     etat_test = env.observation_space.sample()
     taille_input = len(generer_vector_etat(etat_test))
-    agent = Agent(taille_input,len(tab_map_action),16384,128,0.6,0.4,0.99,0.999,1e-4,0.5,0.01,2.5)
+    agent = Agent(taille_input,len(tab_map_action),16384,128,0.6,0.4,0.99,0.999,1e-4,0.5,0.01)
     total_reward=0
     liste_reward=[]
     liste_distances=[]
@@ -445,6 +467,7 @@ if __name__=="__main__":
                 env=gym.make("supertuxkart/simple-v0",num_kart=2)
                 is_visualisation = False
         etat,_=env.reset()
+        agent.net.reset_bruit()
         done=False 
         temps_derapage = 0
         if(iter%100==0):
@@ -461,24 +484,17 @@ if __name__=="__main__":
         compteur_trop_loin = 0
         # Avant la boucle while not done:
         nbframe=0
-        sauvegarde_etats_reward=[]
-        sauvegarde_transi=[]
+        sauvegarde_etats_done=[]
         while not done:
             nbframe+=1
             compteur_nb_ajout+=1
             #on tire une action 
-            if is_visualisation: 
-                #on forward l'état
-                etat_forw=generer_vector_etat(etat)
-                forw=agent.net.forward(etat_forw)
-                #on renvoie l'action avec la plus grosse Q_value
-                action=torch.argmax(forw).item()
-                action_tuple = tab_map_action[action]
-                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
-            else:
-                action=agent.get_action_boltzman(etat)
-                action_tuple = tab_map_action[action]
-                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
+            etat_forw=generer_vector_etat(etat)
+            forw=agent.net.forward(etat_forw)
+            #on renvoie l'action avec la plus grosse Q_value
+            action=torch.argmax(forw).item()
+            action_tuple = tab_map_action[action]
+            action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             
             largeur_chemin = etat_suivant["paths_width"][0][0]
@@ -500,6 +516,7 @@ if __name__=="__main__":
                 reward -= 500
                 print("run terminée car trop lent")
             vector_etat = generer_vector_etat(etat)
+            vector_etat_s = generer_vector_etat(etat_suivant)
             drift = 1 if(action["drift"]==1) else 0
             energie = etat['energy'][0]
             reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
@@ -512,30 +529,16 @@ if __name__=="__main__":
             last_distance_parcourue = etat_suivant["distance_down_track"][0]
             #la partie est finie si on a gagné ou si on est sorti
             done = terminated or truncated
-            transi = Transi(vector_etat,num_action(action),0,None,None)
+            transi = Transi(vector_etat,num_action(action),reward,vector_etat_s,None,None)
             #print(etat_suivant["paths_start"],"\n\n\n",etat_suivant["paths_end"],"\n\n\n",etat_suivant["center_path"],"\n\n\n")
-            
-            #pour le multi step learning, on sauvegarde toutes les transis et couples etat,done et on fait le calcul de reward et l'ajout au buffer a la fin de chaque épisode
-            sauvegarde_etats_reward.append((vector_etat,reward))
-            sauvegarde_transi.append(transi)
-            #agent.buffer.add(transi)
+            agent.buffer.add(transi)
             total_reward+=reward 
             agent.train()
             etat=etat_suivant 
             total_distance+=(etat_suivant["distance_down_track"][0])
             if(done):
                 print("distance : ",etat_suivant["distance_down_track"][0],"\n")
-        nb_step_game=len(sauvegarde_transi)
-        for i in range(nb_step_game):
-            if i >= nb_step_game-n_val : 
-                sauvegarde_transi[i].done_plus_n=True
-            else:
-                sauvegarde_transi[i].done_plus_n=False
-            for j in range(min(n_val,nb_step_game-i)):
-                sauvegarde_transi[i].reward+=(agent.gamma**j)*sauvegarde_etats_reward[i+j][1]
-            agent.buffer.add(sauvegarde_transi[i])
         agent.eps=max(0.15,agent.eps*0.9985)
-        agent.temperature = max(0.3, agent.temperature*0.995)
         print("nb frame :",nbframe)
     plt.plot(liste_reward)
     plt.show()
