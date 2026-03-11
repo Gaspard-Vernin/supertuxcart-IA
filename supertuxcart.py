@@ -18,7 +18,7 @@ n_val=3
 os.environ["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
 os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 class Transi:
-    def __init__(self,etat,action,reward,prochain_etat,done,etat_plus_n):
+    def __init__(self,etat,action,reward,done,etat_plus_n):
         self.etat=etat 
         self.action=action 
         self.reward=reward 
@@ -26,7 +26,7 @@ class Transi:
         self.etat_plus_n = etat_plus_n
     def __eq__(self, t1):
         assert(isinstance(t1,Transi))
-        return (self.etat==t1.etat) and (self.action==t1.action) and (self.reward==t1.reward) and(self.prochain_etat==t1.prochain_etat) and (self.done==t1.done) and (self.etat_plus_n==t1.etat_plus_n)
+        return (self.etat==t1.etat) and (self.action==t1.action) and (self.reward==t1.reward) and (self.done==t1.done) and (self.etat_plus_n==t1.etat_plus_n)
 class Sumtree:
     def __init__(self,taille):
         self.taille=taille 
@@ -177,6 +177,8 @@ class Agent:
         probs = exp_q_values/exp_q_values.sum()
         return np.random.choice(len(probs),p=probs)
     def train(self):
+        if self.buffer.sumtree.taille_actuele<self.buffer.batch_size : 
+            return
         """entraine le réseau sur un minibatch extrait du buffer"""
         transitions,indices,compensations=self.buffer.tirage()
         """Plan : 
@@ -194,17 +196,17 @@ class Agent:
         #pour calculer les targets, on ne veut pas que les gradients soient modifiés
         with torch.no_grad():
             #on calcule les actions suivantes selon le net actuel mais on calcule leur q_values avec le goalnet pour plus de stabilité
-            etats_suivant= torch.tensor(np.array([transitions[i].prochain_etat for i in range(self.buffer.batch_size)]))
-            forws_suivant = self.net.forward(etats_suivant)
+            etats_n_step_suivant= torch.tensor(np.array([transitions[i].etat_plus_n for i in range(self.buffer.batch_size)]))
+            forws_suivant = self.net.forward(etats_n_step_suivant)
             #forws_suivant de dim batch_sizexactions donc on veut argmax selon les actions
             next_actions = forws_suivant.argmax(dim=1)
             #on calcule les q values sur le goal net selon les actions choisies par le net normal
-            forws_suivant_goal = self.goal_net.forward(etats_suivant)
+            forws_suivant_goal = self.goal_net.forward(etats_n_step_suivant)
             q_values_max_goal = forws_suivant_goal[torch.arange(self.buffer.batch_size),next_actions]
             #on vectorise tout pour calculer les target plus vite
             rewards=torch.tensor(np.array([transitions[i].reward for i in range(self.buffer.batch_size)]))
-            dones=torch.tensor(np.array([transitions[i].done for i in range(self.buffer.batch_size)]),dtype=torch.float32)
-            targets = rewards+self.gamma*(1-dones)*q_values_max_goal
+            dones=torch.tensor(np.array([transitions[i].done_plus_n for i in range(self.buffer.batch_size)]),dtype=torch.float32)
+            targets = rewards+(self.gamma**n_val)*(1-dones)*q_values_max_goal
         td_errors = targets-q_values 
         # 3-backprop
         loss = (compensations * F.smooth_l1_loss(q_values, self.alphaupdate*targets, reduction='none')).mean()
@@ -459,7 +461,8 @@ if __name__=="__main__":
         compteur_trop_loin = 0
         # Avant la boucle while not done:
         nbframe=0
-        sauvegarde_etats_done=[]
+        sauvegarde_etats_reward=[]
+        sauvegarde_transi=[]
         while not done:
             nbframe+=1
             compteur_nb_ajout+=1
@@ -497,7 +500,6 @@ if __name__=="__main__":
                 reward -= 500
                 print("run terminée car trop lent")
             vector_etat = generer_vector_etat(etat)
-            vector_etat_s = generer_vector_etat(etat_suivant)
             drift = 1 if(action["drift"]==1) else 0
             energie = etat['energy'][0]
             reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
@@ -510,15 +512,28 @@ if __name__=="__main__":
             last_distance_parcourue = etat_suivant["distance_down_track"][0]
             #la partie est finie si on a gagné ou si on est sorti
             done = terminated or truncated
-            transi = Transi(vector_etat,num_action(action),reward,vector_etat_s,None,None)
+            transi = Transi(vector_etat,num_action(action),0,None,None)
             #print(etat_suivant["paths_start"],"\n\n\n",etat_suivant["paths_end"],"\n\n\n",etat_suivant["center_path"],"\n\n\n")
-            agent.buffer.add(transi)
+            
+            #pour le multi step learning, on sauvegarde toutes les transis et couples etat,done et on fait le calcul de reward et l'ajout au buffer a la fin de chaque épisode
+            sauvegarde_etats_reward.append((vector_etat,reward))
+            sauvegarde_transi.append(transi)
+            #agent.buffer.add(transi)
             total_reward+=reward 
             agent.train()
             etat=etat_suivant 
             total_distance+=(etat_suivant["distance_down_track"][0])
             if(done):
                 print("distance : ",etat_suivant["distance_down_track"][0],"\n")
+        nb_step_game=len(sauvegarde_transi)
+        for i in range(nb_step_game):
+            if i >= nb_step_game-n_val : 
+                sauvegarde_transi[i].done_plus_n=True
+            else:
+                sauvegarde_transi[i].done_plus_n=False
+            for j in range(min(n_val,nb_step_game-i)):
+                sauvegarde_transi[i].reward+=(agent.gamma**j)*sauvegarde_etats_reward[i+j][1]
+            agent.buffer.add(sauvegarde_transi[i])
         agent.eps=max(0.15,agent.eps*0.9985)
         agent.temperature = max(0.3, agent.temperature*0.995)
         print("nb frame :",nbframe)
