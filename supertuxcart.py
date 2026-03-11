@@ -444,7 +444,7 @@ if __name__=="__main__":
     env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000)
     etat_test = env.observation_space.sample()
     taille_input = len(generer_vector_etat(etat_test))
-    agent = Agent(taille_input,len(tab_map_action),16384,128,0.6,0.4,0.99,0.999,1e-4,0.5,0.01)
+    agent = Agent(taille_input,len(tab_map_action),16384,128,0.6,0.4,0.99,0.999,1e-4,0.5,0.01,2.5)
     total_reward=0
     liste_reward=[]
     liste_distances=[]
@@ -453,6 +453,7 @@ if __name__=="__main__":
     last_distance_parcourue = 0
     print("len de tabmap = ",len(tab_map_action))
     compteur_nb_ajout = 0
+    sauvegarde_transi
     for iter in range(0,5000):
         agent.buffer.beta=min(1,1.001*agent.buffer.beta)
         last_distance_parcourue=0
@@ -484,19 +485,36 @@ if __name__=="__main__":
         compteur_trop_loin = 0
         # Avant la boucle while not done:
         nbframe=0
-        sauvegarde_etats_done=[]
+        sauvegarde_etats_reward=[]
+        sauvegarde_transi=[]
         while not done:
             nbframe+=1
             compteur_nb_ajout+=1
             #on tire une action 
-            etat_forw=generer_vector_etat(etat)
-            forw=agent.net.forward(etat_forw)
-            #on renvoie l'action avec la plus grosse Q_value
-            action=torch.argmax(forw).item()
-            action_tuple = tab_map_action[action]
-            action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
+            if is_visualisation: 
+                #on forward l'état
+                etat_forw=generer_vector_etat(etat)
+                forw=agent.net.forward(etat_forw)
+                #on renvoie l'action avec la plus grosse Q_value
+                action=torch.argmax(forw).item()
+                action_tuple = tab_map_action[action]
+                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
+            else:
+                action=agent.get_action_boltzman(etat)
+                action_tuple = tab_map_action[action]
+                action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             
+           
+            vector_etat = generer_vector_etat(etat)
+            drift = 1 if(action["drift"]==1) else 0
+            energie = etat['energy'][0]
+            reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
+                                dist_centre = etat_suivant["center_path_distance"][0] , 
+                                norme_vitesse=norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue,
+                                last_energie=last_energie,energie=energie,
+                                drift=drift,skeed=etat_suivant["skeed_factor"][0],point1=etat_suivant["paths_start"][0],
+                                point2=etat_suivant["paths_start"][2])
             largeur_chemin = etat_suivant["paths_width"][0][0]
             if(abs(etat_suivant["center_path_distance"][0])>largeur_chemin):
                 compteur_trop_loin+=1
@@ -515,30 +533,36 @@ if __name__=="__main__":
                 truncated = True 
                 reward -= 500
                 print("run terminée car trop lent")
-            vector_etat = generer_vector_etat(etat)
-            vector_etat_s = generer_vector_etat(etat_suivant)
-            drift = 1 if(action["drift"]==1) else 0
-            energie = etat['energy'][0]
-            reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
-                                dist_centre = etat_suivant["center_path_distance"][0] , 
-                                norme_vitesse=norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue,
-                                last_energie=last_energie,energie=energie,
-                                drift=drift,skeed=etat_suivant["skeed_factor"][0],x=etat_suivant["paths_start"][1][0],
-                                z=etat_suivant["paths_start"][1][2])
             last_energie=energie
             last_distance_parcourue = etat_suivant["distance_down_track"][0]
             #la partie est finie si on a gagné ou si on est sorti
             done = terminated or truncated
-            transi = Transi(vector_etat,num_action(action),reward,vector_etat_s,None,None)
+            transi = Transi(vector_etat,num_action(action),0,None,None)
             #print(etat_suivant["paths_start"],"\n\n\n",etat_suivant["paths_end"],"\n\n\n",etat_suivant["center_path"],"\n\n\n")
-            agent.buffer.add(transi)
+            
+            #pour le multi step learning, on sauvegarde toutes les transis et couples etat,done et on fait le calcul de reward et l'ajout au buffer a la fin de chaque épisode
+            sauvegarde_etats_reward.append((vector_etat,reward))
+            sauvegarde_transi.append(transi)
+            #agent.buffer.add(transi)
             total_reward+=reward 
             agent.train()
             etat=etat_suivant 
             total_distance+=(etat_suivant["distance_down_track"][0])
             if(done):
                 print("distance : ",etat_suivant["distance_down_track"][0],"\n")
+        nb_step_game=len(sauvegarde_transi)
+        for i in range(nb_step_game):
+            if i >= nb_step_game-n_val : 
+                sauvegarde_transi[i].done_plus_n=True
+                sauvegarde_transi[i].etat_plus_n=sauvegarde_etats_reward[-1][0]
+            else:
+                sauvegarde_transi[i].done_plus_n=False
+                sauvegarde_transi[i].etat_plus_n=sauvegarde_etats_reward[i+n_val][0]
+            for j in range(min(n_val,nb_step_game-i)):
+                sauvegarde_transi[i].reward+=(agent.gamma**j)*sauvegarde_etats_reward[i+j][1]
+            agent.buffer.add(sauvegarde_transi[i])
         agent.eps=max(0.15,agent.eps*0.9985)
+        agent.temperature = max(0.3, agent.temperature*0.995)
         print("nb frame :",nbframe)
     plt.plot(liste_reward)
     plt.show()
