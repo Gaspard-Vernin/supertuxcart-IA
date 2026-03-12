@@ -37,10 +37,6 @@ class Noisy_linear_layer(nn.Module):
     def init_noise_out(self):
         bruit= torch.randn(self.taille_sortie)
         return torch.sign(bruit)*torch.sqrt(torch.abs(bruit))
-    def f(self,x):
-        if x<0:
-            return -math.sqrt(abs(x))
-        return math.sqrt(abs(x))
     def forward(self,input):    
         poids = self.esperance_poids+self.variance_poids*self.matrice_bruit_poids
         biais = self.esperance_biais+self.variance_biais*self.noise_out
@@ -67,7 +63,7 @@ class Sumtree:
         #un arbre parfait qui a x feuilles à 2x-1 noeuds 
         self.tree = np.zeros(taille*2-1)
         #data[i] représente la transition indexée par i
-        self.data = np.zeros(taille,dtype=Transi)
+        self.data = np.empty(taille,dtype=Transi)
         #pointeur pointe sur la prochaine case sur laquelle on va écrire
         self.pointeur=0
         self.taille_actuele=0
@@ -407,6 +403,7 @@ def signal_handler(sig, frame):
         except Exception as e:
             print(f"Erreur lors de la fermeture (normale avec Ctrl+C): {e}")
     sys.exit(0)
+    """
 def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue,last_energie,energie,drift,skeed,point1,point2):
     global last_distance,obj1x,obj1z,is_obj1_boost,obj2x,obj2z,is_obj2_boost,obj3x,obj3z,obj3t,bananex,bananez,is_banane_a_banane
 
@@ -436,6 +433,48 @@ def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcou
     reward= (recompense_boost+reward_banane+reward_drift-30*abs(dist_centre)+100*(distance_parcourue-last_distance_parcourue))
     print("reward totale = ",reward)
     return reward/100
+    """
+def def_reward(distance_parcourue, dist_centre, norme_vitesse, last_distance_parcourue,
+               last_energie, energie, drift, skeed, point1, point2):
+    
+    # ── 1. Signal principal : progression sur le circuit ──────────────────────
+    # C'est le signal le plus important et le plus dense
+    delta_distance = distance_parcourue - last_distance_parcourue
+    # On clip pour éviter les téléportations/resets qui faussent le signal
+    delta_distance = max(-5.0, min(5.0, delta_distance))
+    reward_progression = 2.0 * delta_distance
+
+    # ── 2. Rester au centre de la piste ───────────────────────────────────────
+    # Quadratique : tolérant au centre, sévère sur les bords
+    # dist_centre est en mètres, typiquement [-largeur/2, largeur/2]
+    reward_centre = -0.3 * (dist_centre ** 2)
+
+    # ── 3. Maintenir une bonne vitesse ────────────────────────────────────────
+    # Encourage à accélérer, plafonné pour ne pas dominer
+    # norme_vitesse max experimentale ~23
+    reward_vitesse = 0.1 * min(norme_vitesse, 20.0)
+
+    # ── 4. Ramasser des boosts ────────────────────────────────────────────────
+    # Signal sparse mais important, on le garde car très lisible
+    delta_energie = energie - last_energie
+    reward_boost = 3.0 * max(0.0, delta_energie)   # seulement si on gagne de l'énergie
+
+    # ── 5. Éviter les bananes ─────────────────────────────────────────────────
+    # On punit si la banane est très proche (bananex/z normalisés par 40)
+    # distance < 0.15 ≈ 6m en vrai
+    dist_banane = math.sqrt(bananex**2 + bananez**2)
+    reward_banane = -2.0 if (dist_banane < 0.15 and is_banane_a_banane == 1) else 0.0
+
+    # ── Assemblage ────────────────────────────────────────────────────────────
+    reward = reward_progression + reward_centre + reward_vitesse + reward_boost + reward_banane
+
+    # Debug lisible
+    print(f"prog:{reward_progression:+.2f} | centre:{reward_centre:+.2f} | "
+          f"vitesse:{reward_vitesse:+.2f} | boost:{reward_boost:+.2f} | "
+          f"banane:{reward_banane:+.2f} | TOTAL:{reward:+.2f}")
+
+    # On normalise légèrement pour que les gradients restent stables
+    return reward / 10.0
 # Enregistrez le gestionnaire de signal
 signal.signal(signal.SIGINT, signal_handler)
 taille_input=0
@@ -450,7 +489,9 @@ is_visualisation = False
 last_distance,obj1x,obj1z,is_obj1_boost,obj2x,obj2z,is_obj2_boost,obj3x,obj3z,is_obj3_boost,bananex,bananez,is_banane_a_banane=0,0,0,0,0,0,0,0,0,0,0,0,0
 if __name__=="__main__":
     #on récupère la taille de l'input en testant la sortie de la fonction generer vector etat
-    env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000)
+    env_princ=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=4000)
+    env_visu=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=4000,render_mode="human")
+    env=env_princ
     etat_test = env.observation_space.sample()
     taille_input = len(generer_vector_etat(etat_test))
     agent = Agent(taille_input,len(tab_map_action),16384,128,0.6,0.4,0.99,0.999,1e-4,0.5,0.01)
@@ -462,19 +503,16 @@ if __name__=="__main__":
     last_distance_parcourue = 0
     print("len de tabmap = ",len(tab_map_action))
     compteur_nb_ajout = 0
+ 
     for iter in range(0,5000):
         agent.buffer.beta=min(1,1.001*agent.buffer.beta)
         last_distance_parcourue=0
         print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \niter = ",iter,"\n")
         if mode_vision:
             if(iter%50 == 0 and iter!=0):
-                env.close()
-                env=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=10000,render_mode="human")
-                is_visualisation = True
+                env=env_visu
             if((iter-1)%50==0):
-                env.close()
-                env=gym.make("supertuxkart/simple-v0",num_kart=2)
-                is_visualisation = False
+                env=env_princ
         etat,_=env.reset()
         agent.net.reset_bruit()
         done=False 
@@ -525,7 +563,7 @@ if __name__=="__main__":
                 compteur_trop_loin = max(0,compteur_trop_loin-1)
             if(compteur_trop_loin>=10):
                 truncated=True 
-                reward-=500
+                reward-=50
                 print("run terminée car trop loin")
             if(norme(etat_suivant["velocity"])<seuil_vitesse):
                 compteur_pas_assez_de_vitesse+=1
@@ -534,7 +572,7 @@ if __name__=="__main__":
                 compteur_pas_assez_de_vitesse = max(0,compteur_pas_assez_de_vitesse-1)
             if(compteur_pas_assez_de_vitesse>=60):
                 truncated = True 
-                reward -= 500
+                reward -= 50
                 print("run terminée car trop lent")
             last_energie=energie
             last_distance_parcourue = etat_suivant["distance_down_track"][0]
@@ -566,7 +604,6 @@ if __name__=="__main__":
             for j in range(min(n_val,nb_step_game-i)):
                 sauvegarde_transi[i].reward+=(agent.gamma**j)*sauvegarde_etats_reward[i+j][1]
             agent.buffer.add(sauvegarde_transi[i])
-        agent.eps=max(0.15,agent.eps*0.9985)
     plt.plot(liste_reward)
     plt.show()
     env=gym.make("supertuxkart/simple-v0",track="zengarden",render_mode="human",num_kart=2,max_episode_steps=10000)
@@ -581,7 +618,7 @@ if __name__=="__main__":
             #on renvoie l'action avec la plus grosse Q_value
             action=torch.argmax(forw).item()
             action_tuple = tab_map_action[action]
-            action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2])
+            action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
             #on execute l'action
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             #la partie est finie si on a gagné ou si on est sorti
