@@ -1,3 +1,6 @@
+import os
+os.environ["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
+os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
 import gymnasium as gym
 from pystk2_gymnasium import AgentSpec
 import numpy as np
@@ -13,10 +16,9 @@ import time
 import math
 
 #pour éviter l'erreur EOF
-import os
+
 n_val=3
-os.environ["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
-os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+c
 class Transi:
     def __init__(self,etat,action,reward,done,etat_plus_n):
         self.etat=etat 
@@ -375,10 +377,9 @@ def signal_handler(sig, frame):
             print(f"Erreur lors de la fermeture (normale avec Ctrl+C): {e}")
     sys.exit(0)
 
-def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue,last_energie,energie,drift,skeed,x,z):
+def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcourue,last_energie,energie,drift,skeed,point1,point2):
     global last_distance,obj1x,obj1z,is_obj1_boost,obj2x,obj2z,is_obj2_boost,obj3x,obj3z,obj3t,bananex,bananez,is_banane_a_banane
-    
-    
+
     recompense_boost=0
     if(energie-last_energie>0):
         #plus on prend un gros boost plus la reward est grosse
@@ -392,16 +393,17 @@ def def_reward(distance_parcourue,dist_centre,norme_vitesse,last_distance_parcou
         reward_banane = -200
 
     reward_drift=0
-    angle_a_tourner=math.atan2(x,z)
+    angle_a_tourner=math.atan2(point2[0]-point1[0],point2[2]-point1[2])
+    print("angle_a_tourner : ",angle_a_tourner,"\n")
     if drift==1 :
-        if abs(angle_a_tourner)>math.pi/4:
+        if abs(angle_a_tourner)>math.pi/5:
             #si skeed est grand ie si on a bcp déraper on veut prendre un max de boost donc on continue jusqua la fin du virage
-            reward_drift=(1+2*skeed)**2 * 10
+            reward_drift=(1+2*skeed)* abs(angle_a_tourner-math.pi/5)
         else:
             #on dérape sans être dans un virage
-            reward_drift=-30
+            reward_drift=-60
     print(f"boost:{recompense_boost}---banane:{reward_banane}---drift:{reward_drift}\nvitesse:{norme_vitesse}---dist_centre:{-30*abs(dist_centre)}---delta_dist:{100*(distance_parcourue-last_distance_parcourue)}")
-    reward= (recompense_boost+reward_banane+reward_drift-10*abs(dist_centre)+100*(distance_parcourue-last_distance_parcourue))
+    reward= (recompense_boost+reward_banane+reward_drift-30*abs(dist_centre)+100*(distance_parcourue-last_distance_parcourue))
     print("reward totale = ",reward)
     return reward/100
 
@@ -481,6 +483,16 @@ if __name__=="__main__":
                 action = creer_action(action_tuple[0],action_tuple[1],action_tuple[2],action_tuple[3],action_tuple[4])
             etat_suivant,reward,terminated,truncated,_=env.step(action)
             
+           
+            vector_etat = generer_vector_etat(etat)
+            drift = 1 if(action["drift"]==1) else 0
+            energie = etat['energy'][0]
+            reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
+                                dist_centre = etat_suivant["center_path_distance"][0] , 
+                                norme_vitesse=norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue,
+                                last_energie=last_energie,energie=energie,
+                                drift=drift,skeed=etat_suivant["skeed_factor"][0],point1=etat_suivant["paths_start"][0],
+                                point2=etat_suivant["paths_start"][2])
             largeur_chemin = etat_suivant["paths_width"][0][0]
             if(abs(etat_suivant["center_path_distance"][0])>largeur_chemin):
                 compteur_trop_loin+=1
@@ -499,15 +511,6 @@ if __name__=="__main__":
                 truncated = True 
                 reward -= 500
                 print("run terminée car trop lent")
-            vector_etat = generer_vector_etat(etat)
-            drift = 1 if(action["drift"]==1) else 0
-            energie = etat['energy'][0]
-            reward = def_reward(distance_parcourue = etat_suivant["distance_down_track"][0],
-                                dist_centre = etat_suivant["center_path_distance"][0] , 
-                                norme_vitesse=norme(etat_suivant["velocity"]),last_distance_parcourue=last_distance_parcourue,
-                                last_energie=last_energie,energie=energie,
-                                drift=drift,skeed=etat_suivant["skeed_factor"][0],x=etat_suivant["paths_start"][1][0],
-                                z=etat_suivant["paths_start"][1][2])
             last_energie=energie
             last_distance_parcourue = etat_suivant["distance_down_track"][0]
             #la partie est finie si on a gagné ou si on est sorti

@@ -27,9 +27,10 @@ class Noisy_linear_layer(nn.Module):
         self.variance_poids= nn.Parameter(nn.init.constant_(torch.empty(taille_sortie,taille_entree),0.5/math.sqrt(taille_entree)))
         self.variance_biais=nn.Parameter(nn.init.constant_(torch.empty(taille_sortie),0.5/math.sqrt(taille_sortie)))
     
-        self.noise_in=None
-        self.noise_out=None
-        self.matrice_bruit_poids = None
+        #on init les bruits a 0 car quand on test un reseau pré-entrainé, on veut aucun bruit et donc tt a zero.
+        self.noise_in=torch.zeros(taille_entree)
+        self.noise_out=torch.zeros(taille_sortie)
+        self.matrice_bruit_poids =torch.zeros(taille_sortie,taille_entree)
 
     def init_noise_in(self):
         bruit= torch.randn(self.taille_entree)
@@ -135,7 +136,7 @@ class Buffer:
         #pas de chance, on a tiré que des transition nulles
         taille_segment = self.sumtree.total()/self.batch_size 
         """
-        version claire de la version vectoriése ci dessous
+        version claire de la version vectoriése ci dessous<
         tirage = []
         for i in range(taille_segment):
             #on tire la position sur l'interval, puis on décale jusqu'à l'interval
@@ -442,7 +443,7 @@ def def_reward(distance_parcourue, dist_centre, norme_vitesse, last_distance_par
     delta_distance = distance_parcourue - last_distance_parcourue
     # On clip pour éviter les téléportations/resets qui faussent le signal
     delta_distance = max(-5.0, min(5.0, delta_distance))
-    reward_progression = 2.0 * delta_distance
+    reward_progression = 10 * delta_distance
 
     # ── 2. Rester au centre de la piste ───────────────────────────────────────
     # Quadratique : tolérant au centre, sévère sur les bords
@@ -452,7 +453,7 @@ def def_reward(distance_parcourue, dist_centre, norme_vitesse, last_distance_par
     # ── 3. Maintenir une bonne vitesse ────────────────────────────────────────
     # Encourage à accélérer, plafonné pour ne pas dominer
     # norme_vitesse max experimentale ~23
-    reward_vitesse = 0.1 * min(norme_vitesse, 20.0)
+    reward_vitesse = 2*min(norme_vitesse, 20.0)
 
     # ── 4. Ramasser des boosts ────────────────────────────────────────────────
     # Signal sparse mais important, on le garde car très lisible
@@ -491,6 +492,8 @@ if __name__=="__main__":
     #on récupère la taille de l'input en testant la sortie de la fonction generer vector etat
     env_princ=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=4000)
     env_visu=gym.make("supertuxkart/simple-v0" ,num_kart=2,max_episode_steps=4000,render_mode="human")
+    env_princ.reset()
+    env_visu.reset()
     env=env_princ
     etat_test = env.observation_space.sample()
     taille_input = len(generer_vector_etat(etat_test))
@@ -509,10 +512,8 @@ if __name__=="__main__":
         last_distance_parcourue=0
         print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \niter = ",iter,"\n")
         if mode_vision:
-            if(iter%50 == 0 and iter!=0):
-                env=env_visu
-            if((iter-1)%50==0):
-                env=env_princ
+            is_visualisation = (iter % 25 == 0 and iter != 0)
+            env = env_visu if is_visualisation else env_princ
         etat,_=env.reset()
         agent.net.reset_bruit()
         done=False 
@@ -590,7 +591,7 @@ if __name__=="__main__":
             etat=etat_suivant 
             total_distance+=(etat_suivant["distance_down_track"][0])
             if(done):
-                print("distance : ",etat_suivant["distance_down_track"][0],"\n")
+                print("\n\ndistance : ",etat_suivant["distance_down_track"][0],"\n\n")
         vector_etat_final = generer_vector_etat(etat_suivant)
         sauvegarde_etats_reward.append((vector_etat_final, 0))
         nb_step_game=len(sauvegarde_transi)
@@ -606,7 +607,7 @@ if __name__=="__main__":
             agent.buffer.add(sauvegarde_transi[i])
     plt.plot(liste_reward)
     plt.show()
-    env=gym.make("supertuxkart/simple-v0",track="zengarden",render_mode="human",num_kart=2,max_episode_steps=10000)
+    env=gym.make("supertuxkart/simple-v0",track="zengarden",render_mode="human",num_kart=2,max_episode_steps=5000)
     for iter in range(5):
         etat,_=env.reset()
         done=False 
