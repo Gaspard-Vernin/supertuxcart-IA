@@ -35,9 +35,9 @@ class Noisy_linear_layer(nn.Module):
         bruit= torch.randn(self.taille_sortie)
         return torch.sign(bruit)*torch.sqrt(torch.abs(bruit))
     def forward(self,input):    
-        poids = (self.esperance_poids+self.variance_poids*self.matrice_bruit_poids).float()
-        biais = (self.esperance_biais+self.variance_biais*self.noise_out).float()
-        output = torch.nn.functional.linear(input.float(),poids,biais)
+        poids = (self.esperance_poids+self.variance_poids*self.matrice_bruit_poids)
+        biais = (self.esperance_biais+self.variance_biais*self.noise_out)
+        output = torch.nn.functional.linear(input,poids,biais)
         return output
     def reset_bruit(self):
         self.noise_in=self.init_noise_in()
@@ -55,7 +55,7 @@ class Net (nn.Module):
         self.fc3V=Noisy_linear_layer(128,1*N)
         self.optimizer = optim.Adam(self.parameters(), lr=0.001)
         self.v_min=0
-        self.v_max=200
+        self.v_max=500
         self.valeurs_possibles_actions=torch.linspace(self.v_min,self.v_max,N)
         self.delta=(self.v_max-self.v_min)/(N-1)
         self.N=N
@@ -103,47 +103,46 @@ class Net (nn.Module):
         #recuperer les transitions du batch du buffer
         transitions, indices, compensations = buffer.tirage()
 
-        rewards=[transition.reward for transition in transitions]
-        dones=[transition.done for transition in transitions]
-        states=np.array([transition.state for transition in transitions],dtype=np.float32)
-        prochaines_actions=torch.tensor([transition.action for transition in transitions])
+        rewards=torch.tensor([transition.reward for transition in transitions]).unsqueeze(1)
+        dones=torch.tensor([transition.done for transition in transitions]).unsqueeze(1)
+        states=torch.tensor(np.array(np.stack([transition.state for transition in transitions]),dtype=np.float32))
+        next_states=torch.tensor(np.array(np.stack([transition.prochaine_etat for transition in transitions])))
+        actions=torch.tensor([transition.action for transition in transitions])
         #on feed les transitions
         feed_state = self.forward(torch.tensor(states))
-        pred_actions_jouees = feed_state[torch.arange(len(transitions)), prochaines_actions, :]
+        pred_actions_jouees = feed_state[torch.arange(len(transitions)), actions, :]
         #calcul des target pour chaque transitions
         with torch.no_grad():
             #on forward les prochaines actions 
             
-            forw_net = self.forward(prochaines_actions)
+            forw_net = self.forward(next_states)
             #on calcule les Q values qui sont donc l'esperances des lois trouvées pr chaque action
-            q_values_next_action_net = (forw_net[i]*self.valeurs_possibles_actions[i]).sum(dim=2)
+            q_values_next_action_net = (forw_net*self.valeurs_possibles_actions).sum(dim=2)
             #on choisit la plus grande Q value pour l'action suivante
             next_actions = torch.argmax(q_values_next_action_net,dim=1)
 
             #on calcule la distribution associée a la next action mais dans le goalnet
-            forw_goal_net=goal_net.forward(prochaines_actions)
+            forw_goal_net=goal_net.forward(next_states)
             prochaine_distributions=forw_goal_net[torch.arange(len(transitions)),next_actions,:]
 
-            target = rewards.unsqueeze(1) + (gamma**self.n)*self.valeurs_possibles_actions*(1-dones.unsqueeze(1))
+            target = rewards + (gamma**self.n)*self.valeurs_possibles_actions*(~dones)
             target=torch.clamp(target,self.v_min,self.v_max)
 
             target_normalisee=(target-self.v_min)/self.delta 
-            atome_gauche = target_normalisee.floor()
-            atome_droit = target_normalisee.ceil()
+            atome_gauche = (target_normalisee.floor()).long()
+            atome_droit = (target_normalisee.ceil()).long()
 
             #traitement du cas chiant où on tombe pile sur un atome
             atome_droit[(atome_droit == atome_gauche) & (atome_droit < self.N - 1)] += 1
             atome_gauche[(atome_droit == atome_gauche) & (atome_gauche > 0)] -= 1
 
             distrib_finale=torch.zeros(target_normalisee.shape)
-            for i in range(self.batch_size):
-                for j in range(self.N):
-                    indice_floor = int(atome_gauche[i,j].item())
-                    indice_ceil = int(atome_droit[i,j].item())
-                    proba=prochaine_distributions[i,j]
-                    distrib_finale[i,indice_floor]+=proba*(atome_droit[i,j]-target_normalisee[i,j])
-                    distrib_finale[i,indice_ceil]+=proba*(target_normalisee[i,j]-atome_gauche[i,j])
-        self.backprop(pred_actions_jouees,distrib_finale,compensations,buffer)
+            repartition_gauche=prochaine_distributions*(atome_droit-target_normalisee)
+            repartition_droite=prochaine_distributions*(target_normalisee-atome_gauche)
+
+            distrib_finale.scatter_add_(1,atome_gauche,repartition_gauche)
+            distrib_finale.scatter_add_(1,atome_droit,repartition_droite)
+        self.backprop(pred_actions_jouees,distrib_finale,compensations,buffer,indices)
 class Agent():
     def __init__(self, net,goal_net,buffer,gamma):
         self.net=net 
@@ -205,6 +204,8 @@ class Sumtree:
         #quand indice_arbre=0, il est ensuite update a -1 donc on quitte la boucle pile après avoir finit toutes les modif
         while(indice_arbre>=0):
             self.tree[indice_arbre]+=(priorité-ancienne_priorité)
+            if indice_arbre==0:
+                break
             #le parent d'un noeud d'indexe i dans un arbre parfait est a l'index partie entière de(i-1)//2
             indice_arbre = (indice_arbre-1)//2
     def total(self):
@@ -271,11 +272,11 @@ class Buffer:
             poid=abs(td_error)**self.alpha+1e-5
             self.sumtree.update(self.sumtree.i_data_to_i_arbre(indice),poid)
 
-gamma=0.9
-n = 1
+gamma=0.99
+n = 3
 net=Net(n)
 goal_net=Net(n)
-buffer=Buffer(capacity=2000,alpha=0.6,batch_size=64,beta=0.4)
+buffer=Buffer(capacity=5000,alpha=0.6,batch_size=64,beta=0.4)
 player=Agent(net,goal_net,buffer,gamma)
 player.fusionner_poids()
 env=gym.make("CartPole-v1")
