@@ -1,9 +1,4 @@
 import os
-os.environ["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
-os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
-os.environ["PYOPENGL_PLATFORM"] = "egl"
-os.environ["SDL_VIDEODRIVER"] = "offscreen"
-os.environ["EGL_PLATFORM"] = "surfaceless"
 import numpy as np 
 import pystk2_gymnasium
 import torch.nn as nn
@@ -403,6 +398,10 @@ def def_reward(distance_parcourue, dist_centre, last_distance_parcourue,
             reward_drift = -0.3
 
     return delta_dist + penalite_centre + recompense_boost + reward_banane + reward_drift
+
+def reward_reste_centre_map(distance_parcourue,dist_centre,last_distance_parcourue):
+    return 15*(distance_parcourue-last_distance_parcourue) - abs(dist_centre) 
+
 def signal_handler(sig, frame):
     global env
     if env is not None:
@@ -436,8 +435,9 @@ if __name__ == "__main__":
     player = Agent(net, goal_net, buffer, gamma)
     player.fusionner_poids()
  
-    env = gym.make("supertuxkart/simple-v0", num_kart=2, max_episode_steps=10000)
- 
+    env_normal = gym.make("supertuxkart/simple-v0",track='cocoa_temple',num_kart=2, max_episode_steps=5000)
+    env_visu =  gym.make("supertuxkart/simple-v0",track='cocoa_temple',render_mode="human",num_kart=2, max_episode_steps=5000)
+    env=env_normal
     total_reward = 0
     liste_total_reward = []
     sauvegarde_etats_reward = []
@@ -447,20 +447,18 @@ if __name__ == "__main__":
     seuil_vitesse = 0.5
  
     for iter in range(5000):
-        if iter != 0 and iter % 100 == 0:
+        if iter == 0 or (iter != 0 and iter % 100 == 0):
             liste_total_reward.append(total_reward / 100)
             print(f"iter : {iter} score : {total_reward/100} taille buffer : {player.buffer.sumtree.taille_actuelle}")
             torch.save(player.net.state_dict(), f"save_iter_{iter}.pth")
             total_reward = 0
  
         if mode_vision:
-            if iter % 25 == 0 and iter != 0:
-                env.close()
-                env = gym.make("supertuxkart/simple-v0", num_kart=2, max_episode_steps=10000, render_mode="human")
+            if iter!= 0 and iter % 25 == 0 :
+                env = env_visu
                 is_visualisation = True
-            if (iter - 1) % 25 == 0 and iter != 1:
-                env.close()
-                env = gym.make("supertuxkart/simple-v0", num_kart=2, max_episode_steps=10000)
+            if (iter - 1) % 25 == 0 :
+                env = env_normal
                 is_visualisation = False
  
         etat, _ = env.reset()
@@ -515,7 +513,7 @@ if __name__ == "__main__":
  
             energie = etat["energy"][0]
             drift = int(action_tuple[4])
-            recompense = def_reward(
+            """recompense = def_reward(
                 distance_parcourue=etat_suivant["distance_down_track"][0],
                 dist_centre=etat_suivant["center_path_distance"][0],
                 last_distance_parcourue=last_distance_parcourue,
@@ -525,7 +523,10 @@ if __name__ == "__main__":
                 skeed=etat_suivant["skeed_factor"][0],
                 point1=etat_suivant["paths_start"][0],
                 point2=etat_suivant["paths_start"][2]
-            ) + penalite_fin
+            ) + penalite_fin """
+            recompense = reward_reste_centre_map(distance_parcourue=etat_suivant["distance_down_track"][0],
+                dist_centre=etat_suivant["center_path_distance"][0],
+                last_distance_parcourue=last_distance_parcourue)
  
             last_energie = energie
             last_distance_parcourue = etat_suivant["distance_down_track"][0]

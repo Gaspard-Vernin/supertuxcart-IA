@@ -1,15 +1,17 @@
 import os
 import gymnasium as gym
+import sys
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 import pystk2_gymnasium
 import numpy as np
 import torch
 import math
-import time
 import supertuxcart_rainbow_dqn as m
 
-chemin_save = 'save_iter_100.pth'
+chemin_save = 'save_iter_2700.pth'
 
 if __name__ == "__main__":
+    frames = []
     tab_map_action = m.tab_map_action
     taille_input = 27
     nb_actions = len(tab_map_action)
@@ -18,21 +20,20 @@ if __name__ == "__main__":
     net.load_state_dict(torch.load(chemin_save))
     net.supprimer_bruit()
 
-    env = gym.make("supertuxkart/simple-v0", render_mode="human", num_kart=2, max_episode_steps=10000)
+    # render_mode=None pour désactiver l'affichage graphique
+    env = gym.make("supertuxkart/simple-v0", render_mode="human", num_kart=2, max_episode_steps=10000,track="cocoa_temple")
 
     total_reward = 0
-    total_distance = 0
     last_distance_parcourue = 0
     compteur_pas_assez_de_vitesse = 0
     compteur_trop_loin = 0
     seuil_vitesse = 0.5
     last_energie = 0
 
-    print("len de tabmap = ", len(tab_map_action))
-
     etat, _ = env.reset()
     done = False
-
+    print("lesgi")
+    a=input()
     while not done:
         etat_forw = m.generer_vector_etat(etat)
         with torch.no_grad():
@@ -44,6 +45,12 @@ if __name__ == "__main__":
         action = m.creer_action(action_tuple[0], action_tuple[1], action_tuple[2], action_tuple[3], action_tuple[4])
 
         etat_suivant, _, terminated, truncated, _ = env.step(action)
+        print(etat)
+        # Extraction propre de l'image
+        if "image" in etat:
+            frames.append(etat["image"][0])
+        elif "rgb" in etat:
+            frames.append(etat["rgb"][0])
 
         largeur_chemin = etat_suivant["paths_width"][0][0]
         if abs(etat_suivant["center_path_distance"][0]) > largeur_chemin:
@@ -52,7 +59,6 @@ if __name__ == "__main__":
             compteur_trop_loin = max(0, compteur_trop_loin - 1)
         if compteur_trop_loin >= 10:
             truncated = True
-            print("run terminée car trop loin")
 
         vitesse = math.sqrt(etat_suivant["velocity"][0]**2 + etat_suivant["velocity"][1]**2 + etat_suivant["velocity"][2]**2)
         if vitesse < seuil_vitesse:
@@ -61,7 +67,6 @@ if __name__ == "__main__":
             compteur_pas_assez_de_vitesse = max(0, compteur_pas_assez_de_vitesse - 1)
         if compteur_pas_assez_de_vitesse >= 60:
             truncated = True
-            print("run terminée car trop lent")
 
         energie = etat["energy"][0]
         drift = int(action_tuple[4])
@@ -81,10 +86,16 @@ if __name__ == "__main__":
         last_distance_parcourue = etat_suivant["distance_down_track"][0]
         done = terminated or truncated
         total_reward += reward
-        total_distance += etat_suivant["distance_down_track"][0]
         etat = etat_suivant
-        time.sleep(0.05)
+
+    env.close()
+
+    if len(frames) > 0:
+        clip = ImageSequenceClip(frames, fps=30)
+        clip.write_videofile("run.mp4")
+        print("Vidéo sauvegardée.")
+    else:
+        print("Erreur : Aucune image trouvée dans l'état.")
 
     print(f"distance : {etat_suivant['distance_down_track'][0]:.1f}")
     print(f"reward totale : {total_reward:.2f}")
-    env.close()
